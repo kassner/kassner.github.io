@@ -1,0 +1,506 @@
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="4.1.1">Jekyll</generator><link href="https://www.kassner.com.br/atom.xml" rel="self" type="application/atom+xml" /><link href="https://www.kassner.com.br/" rel="alternate" type="text/html" /><updated>2021-06-13T14:00:03+00:00</updated><id>https://www.kassner.com.br/atom.xml</id><title type="html">Rafael Kassner</title><entry><title type="html">My ZFS backup strategy</title><link href="https://www.kassner.com.br/en/2020/12/19/zfs-backup-strategy/" rel="alternate" type="text/html" title="My ZFS backup strategy" /><published>2020-12-19T00:00:00+00:00</published><updated>2020-12-19T00:00:00+00:00</updated><id>https://www.kassner.com.br/en/2020/12/19/zfs-backup-strategy</id><content type="html" xml:base="https://www.kassner.com.br/en/2020/12/19/zfs-backup-strategy/">&lt;p&gt;I am now doing some experiments running my own NAS at home (mostly out of boredom), and I went with a small solution that goes inside my &lt;a href=&quot;https://www.ikea.com/se/sv/p/ikea-ps-skap-vit-10251451/&quot;&gt;IKEA PS&lt;/a&gt; with a Raspberry Pi 4, a couple of 1TB USB SATA disks and &lt;a href=&quot;https://zfsonlinux.org/&quot;&gt;ZFS on Linux&lt;/a&gt; mirroring them. I have less than 200GB in data and a very stable 50Mbps uplink at home, so this post explains my strategy to backup my data in a remote location.&lt;/p&gt;
+
+&lt;p&gt;Before I even started, I had to decide what would be my backup strategy. Given I’m running this from a home connection, it wasn’t an option to do full backups every day, specially when my data rarely changes more than 50MB in a given day, so I had to think about something that would play nice with incremental backups.&lt;/p&gt;
+
+&lt;p&gt;I first researched tools for such tools, and was amazed by &lt;a href=&quot;https://www.borgbackup.org/&quot;&gt;Borg&lt;/a&gt;, but given I planned to backup this directly to an S3/GCS/B2 bucket, I found too many limitations on it. I can’t have the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;borg&lt;/code&gt; binary running in the remote, so I either needed a full copy of the data locally or it had to download a lot of data from the bucket to be able to compute the incremental diff.&lt;/p&gt;
+
+&lt;p&gt;My second test was with ZFS. Seeing demos of &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;zfs send | ssh remote zfs recv&lt;/code&gt; was very beautiful, but again, I won’t have a way to run ZFS on the remote. But I did a few tests with it that caught my attention. First, snapshot management in ZFS is awesome to manage changes across time. Second, you can pipe &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;zfs send&lt;/code&gt; to a file. Third, while &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;zfs send&lt;/code&gt; is commonly used to send a snapshot to another machine also running ZFS (&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;zfs send | ssh remote zfs recv&lt;/code&gt;), when you pipe &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;zfs send&lt;/code&gt; to a non-ZFS command (or file), it will dump &lt;em&gt;the entire filesystem&lt;/em&gt;, essentially creating a full backup. Fourth, you can &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;zfs send&lt;/code&gt; just the diff between two snapshots, even to a file. So I put all of them together to create this backup strategy.&lt;/p&gt;
+
+&lt;h2 id=&quot;backup-strategy&quot;&gt;Backup strategy&lt;/h2&gt;
+
+&lt;p&gt;Note: the command &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;backup-upload&lt;/code&gt; below is an unpublished tool that will compress, encrypt and upload the file to a remote location.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Creating the full backup&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;I’ve imported some data and then created a snapshot with &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;zfs snapshot data@&amp;lt;date&amp;gt;&lt;/code&gt; (i.e.: &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;zfs snapshot data@2020-08-24&lt;/code&gt;). This snapshot was then uploaded to a remote location using &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;zfs send data@2020-08-24 | backup-upload full/2020-08-24&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Creating daily backups&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Every day, a cronjob creates a new snapshot and uploads to remote using &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;zfs send -I &amp;lt;yesterdaySnapshot&amp;gt; &amp;lt;todaySnapshot&amp;gt; | backup-upload daily/&amp;lt;date&amp;gt;&lt;/code&gt;).&lt;/p&gt;
+
+&lt;p&gt;&lt;strong&gt;Creating monthly backups&lt;/strong&gt;&lt;/p&gt;
+
+&lt;p&gt;Once a month, after the daily snapshot was created, a cronjob uploads it using &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;zfs send -I &amp;lt;fullbackup&amp;gt; &amp;lt;todaySnapshot&amp;gt; | backup-upload monthly/&amp;lt;date&amp;gt;&lt;/code&gt;).&lt;/p&gt;
+
+&lt;p&gt;This cronjob will also mark for deletion older monthly and daily backups, except the full backup.&lt;/p&gt;
+
+&lt;h2 id=&quot;restoration-strategy&quot;&gt;Restoration strategy&lt;/h2&gt;
+
+&lt;p&gt;Backups are worthless if they can’t be restored. This is the strategy to restore the data from the remote location. This assumes the data in &lt;em&gt;both&lt;/em&gt; my local disks can’t be trusted anymore, so I’ll restore the backups from remote into a brand new disk with an empty zpool.&lt;/p&gt;
+
+&lt;p&gt;While creating the monthly backups, I run &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;zfs send&lt;/code&gt; against the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;&amp;lt;fullbackup&amp;gt;&lt;/code&gt;. This means that the restoration process needs 1) the full backup; 2) the latest &lt;em&gt;monthly&lt;/em&gt; backup and 3) all daily backups since the last monthly backup. This way &lt;em&gt;most&lt;/em&gt; of my data will be restored by obtaining just two files, while I still retain the daily granularity if my future self wishes to use it.&lt;/p&gt;
+
+&lt;p&gt;The &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;backup-download&lt;/code&gt; command below is an unpublished tool that will download, decrypt and decompress the file from a remote location.&lt;/p&gt;
+
+&lt;p&gt;Commands:&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;backup-download full/2020-08-24 | zfs recv data
+
+backup-download monthly/2020-12-01 | zfs recv data
+
+backup-download daily/2020-12-02 | zfs recv data
+backup-download daily/2020-12-03 | zfs recv data
+...
+backup-download daily/2020-12-19 | zfs recv data
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h2 id=&quot;outro&quot;&gt;Outro&lt;/h2&gt;
+
+&lt;p&gt;This is just an experiment and this blog post is a live document that will be updated as I fine tune my strategy. I am yet to buy a new disk and attempt full restoration from remote (I did small scale tests only). I am not too worried about losing data at this point because I have another external disk, without ZFS, that I manually copy all the data into regularly. If you want to try this yourself be careful, as you can lose data.&lt;/p&gt;</content><author><name></name></author><category term="en" /><category term="linux" /><summary type="html">I am now doing some experiments running my own NAS at home (mostly out of boredom), and I went with a small solution that goes inside my IKEA PS with a Raspberry Pi 4, a couple of 1TB USB SATA disks and ZFS on Linux mirroring them. I have less than 200GB in data and a very stable 50Mbps uplink at home, so this post explains my strategy to backup my data in a remote location.</summary></entry><entry><title type="html">Fedora 28 on Lenovo Y720-15IBK</title><link href="https://www.kassner.com.br/en/2018/06/27/fedora-28-on-lenovo-y720-15ibk/" rel="alternate" type="text/html" title="Fedora 28 on Lenovo Y720-15IBK" /><published>2018-06-27T00:00:00+00:00</published><updated>2018-06-27T00:00:00+00:00</updated><id>https://www.kassner.com.br/en/2018/06/27/fedora-28-on-lenovo-y720-15ibk</id><content type="html" xml:base="https://www.kassner.com.br/en/2018/06/27/fedora-28-on-lenovo-y720-15ibk/">&lt;p&gt;It’s almost a year since I purchased this gaming computer and just now I had the need to do anything else than gaming in it. I have a friend that recently bought a notebook with a Nvidia GTX 1060 and he installed Fedora, making it a very snappy workstation, so I decided to give Fedora a go again. My computer came with Windows 10 by default and I never changed anything there, so here I am writing down all knowledge I got from installing Fedora in this machine.&lt;/p&gt;
+
+&lt;h2 id=&quot;partitioning&quot;&gt;Partitioning&lt;/h2&gt;
+
+&lt;p&gt;Partitioning the disk using the Windows disk management tool worked just fine.&lt;/p&gt;
+
+&lt;h2 id=&quot;live-usb&quot;&gt;Live USB&lt;/h2&gt;
+
+&lt;p&gt;Fedora Media Writer for Windows worked as intended.&lt;/p&gt;
+
+&lt;h2 id=&quot;rebooting-into-the-live-usb&quot;&gt;Rebooting into the Live USB&lt;/h2&gt;
+
+&lt;p&gt;Two tricky things. First one is &lt;a href=&quot;https://www.windowscentral.com/how-disable-windows-10-fast-startup&quot;&gt;disable Fastboot&lt;/a&gt;. The second one is that even disabling it on Windows, I still couldn’t get into my BIOS. I had to click on restart while holding shift and then use the Windows repair menu to get into the BIOS. Once inside the BIOS, I disabled the Fastboot and also allowed the boot over USB that was needed. Figuring out how to make into the BIOS took me some time also, but somehow I learned that I should use &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;Fn + F2&lt;/code&gt; for the BIOS and &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;Fn + F12&lt;/code&gt; for the boot menu.&lt;/p&gt;
+
+&lt;h2 id=&quot;disk-not-recognized&quot;&gt;Disk not recognized&lt;/h2&gt;
+
+&lt;p&gt;Booting into the Live USB was fine, but the installer could not recognize my NVMe disk at all. After a lot of research I landed into this tip that was to set the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;Sata Controller Mode&lt;/code&gt; to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;AHCI&lt;/code&gt;. I had &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;Intel RST Premium&lt;/code&gt; configured there and doing the change, Fedora was able to find my disk.&lt;/p&gt;
+
+&lt;p&gt;Sadly, I could not get back to Windows with that configuration. Selecting Windows on GRUB will reboot the computer and start attempt to load Windows, but eventually I get an Windows-like error message saying that was not possible to boot. The error code was &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;INACCESSIBLE_BOOT_DEVICE&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;It took me a couple of hours investigating just this issue until I managed to make it work. I had to &lt;a href=&quot;http://support.thinkcritical.com/kb/articles/switch-windows-10-from-raid-ide-to-ahci&quot;&gt;Switch Windows 10 from RAID/IDE to AHCI&lt;/a&gt;, but I struggled a bit because I was doing that from the Repair tool instead of loading Windows normally. After I gave it a go from scratch, it worked as expected. Now I have dual boot on GRUB for Fedora and Windows, and my &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;Sata Controller Mode&lt;/code&gt; is set to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;AHCI&lt;/code&gt;.&lt;/p&gt;
+
+&lt;h2 id=&quot;nvidia-driver&quot;&gt;NVidia driver&lt;/h2&gt;
+
+&lt;h3 id=&quot;installation&quot;&gt;Installation&lt;/h3&gt;
+
+&lt;p&gt;&lt;a href=&quot;https://www.if-not-true-then-false.com/2015/fedora-nvidia-guide/&quot;&gt;This tutorial&lt;/a&gt; covers majority of the installation process, but I’ll detail here what went wrong.&lt;/p&gt;
+
+&lt;h3 id=&quot;issues&quot;&gt;Issues&lt;/h3&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ERROR: could not insert 'nvidia_drm': Operation not permitted&lt;/code&gt;.&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;Disabling Secure Boot and SELinux while installing the driver fixed this problem. Providing the x509 cert and key created before to the NVidia installer did not help. I had to disable Secure Boot and sign it manually later.&lt;/p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;Wrong resolution&lt;/li&gt;
+&lt;/ul&gt;
+
+&lt;p&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;xrandr -q&lt;/code&gt; was showing &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;eDP-1-1 primary connected 960x540+0+0&lt;/code&gt;. My monitor is 1080p. To fix that, I tried several different things, like setting the Mode manually inside the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;xorg.conf&lt;/code&gt;, setting the DPI, extracting the EDID using NVidia tools, disable EDID usage, &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;xrandr&lt;/code&gt; with different combinations, and several variations inside the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;Xorg.conf&lt;/code&gt;, but nothing worked. In the end, it was just a matter of enabling &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;DPMS&lt;/code&gt; and &lt;a href=&quot;https://gist.github.com/kassner/7efbbf6c5bb56ec1270df31983bad617&quot;&gt;my xorg.conf&lt;/a&gt; now looks like this.&lt;/p&gt;
+
+&lt;p&gt;I also followed the &lt;a href=&quot;https://forum.manjaro.org/t/howto-set-up-prime-with-nvidia-proprietary-driver/40225&quot;&gt;scripting part of this tutoria&lt;/a&gt;, but I am not sure if this is doing anything for me right now. I also have the xrandr lines on my &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;~/.profile&lt;/code&gt;.&lt;/p&gt;
+
+&lt;h3 id=&quot;secure-boot&quot;&gt;Secure Boot&lt;/h3&gt;
+
+&lt;p&gt;I disabled Secure boot while installing the Nvidia driver, but later I enabled it back. It was less difficult than I expected. I followed &lt;a href=&quot;http://www.pellegrino.link/2015/11/29/signing-nvidia-proprietary-driver-on-fedora.html&quot;&gt;this tutorial from Laurent&lt;/a&gt;, but I am writing here it again for backup AND because I didn’t find the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;.ko&lt;/code&gt; files in the first place (because they were compressed).&lt;/p&gt;
+
+&lt;p&gt;First off, I had to generate some keys and add them to the Secure Boot mechanism, otherwise UEFI wouldn’t be able to know if the modules it is loading are trusted or not. For that, I needed a configuration file, which I created at &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;~/x509.ini&lt;/code&gt; with the content:&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;[req]
+default_bits = 4096
+distinguished_name = req_distinguised_name
+prompt = no
+string_mask = utf8only
+x509_extensions = myexts
+
+[req_distinguised_name]
+O = kassner
+CN = kassner
+emailAddress = email@example.com
+
+[myexts]
+basicConstraints=critical,CA:FALSE
+keyUsage=digitalSignature
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Then:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;openssl req -x509 -new -nodes -utf8 -sha256 -days 36500 -batch -config x509.ini -outform DER -out public_key.der -keyout private_key.priv&lt;/code&gt;;&lt;/li&gt;
+  &lt;li&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;mokutil --import public_key.der&lt;/code&gt;;&lt;/li&gt;
+  &lt;li&gt;Reboot and follow the instructions to import the certificate;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;And to sign the NVidia drivers:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;find / -name 'nvidia.ko.xz'&lt;/code&gt;. The other files were in the same folder;&lt;/li&gt;
+  &lt;li&gt;Backup them somewhere else;&lt;/li&gt;
+  &lt;li&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;xz --decompress *.ko.xz&lt;/code&gt;;&lt;/li&gt;
+  &lt;li&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;/usr/src/kernels/$(uname -r)/scripts/sign-file sha256 ~/private_key.priv ~/public_key.der nvidia.ko&lt;/code&gt; and for the other &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;.ko&lt;/code&gt; files;&lt;/li&gt;
+  &lt;li&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;xz --compress nvidia.ko&lt;/code&gt; and the other &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;.ko&lt;/code&gt; files as well;&lt;/li&gt;
+  &lt;li&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;modinfo nvidia&lt;/code&gt; to be sure they are working;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h2 id=&quot;language-keyboard-locale-etc&quot;&gt;Language, keyboard, locale, etc&lt;/h2&gt;
+
+&lt;p&gt;I have a weird keyboard and language combination that I had to address for this computer. My computer has a Swedish keyboard, with the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ä ö å&lt;/code&gt; keys. I have an USB keyboard that shares the same layout. But, I was raised with a US keyboard and I do write Portuguese every day as well, so writing letters like &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;é ç ã&lt;/code&gt; is essential for me. At the same time, I rather use the US keyboard layout instead, since my muscle memory is already built around it. To orchestrate all this mess, I spent several days trying out different things until I finally managed.&lt;/p&gt;
+
+&lt;p&gt;Sadly, since it was so scattered around and I couldn’t remember everything I did, I am most likely missing some things here. I am writing what I remember and I’ll update in the future if I ever find out what is wrong.&lt;/p&gt;
+
+&lt;h3 id=&quot;dates&quot;&gt;Dates&lt;/h3&gt;
+
+&lt;p&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;date&lt;/code&gt; and some other parts of some apps were returning localized information for me in Swedish. This was mainly due the fact that only &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;$LANG&lt;/code&gt; was set to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;en_US.UTF-8&lt;/code&gt; and all other variables were set to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;sv_SE.UTF-8&lt;/code&gt;, because I selected &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;English&lt;/code&gt; as language and &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;Sweden (English)&lt;/code&gt; as format.&lt;/p&gt;
+
+&lt;p&gt;To fix this, I tried several different things, and what I believe it worked was:&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;sudo localedef -v -c -i en_US -f UTF-8 en_SE.UTF-8
+sudo localectl set-locale LANG=en_SE.UTF-8
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;And keep my &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;/etc/locale.conf&lt;/code&gt; like this:&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;LANG=en_SE.UTF-8
+LC_CTYPE=&quot;en_SE.UTF-8&quot;
+LC_NUMERIC=&quot;en_SE.UTF-8&quot;
+LC_TIME=&quot;en_SE.UTF-8&quot;
+LC_COLLATE=&quot;en_SE.UTF-8&quot;
+LC_MONETARY=&quot;en_SE.UTF-8&quot;
+LC_MESSAGES=&quot;en_SE.UTF-8&quot;
+LC_PAPER=&quot;en_SE.UTF-8&quot;
+LC_NAME=&quot;en_SE.UTF-8&quot;
+LC_ADDRESS=&quot;en_SE.UTF-8&quot;
+LC_TELEPHONE=&quot;en_SE.UTF-8&quot;
+LC_MEASUREMENT=&quot;en_SE.UTF-8&quot;
+LC_IDENTIFICATION=&quot;en_SE.UTF-8&quot;
+LC_ALL=
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;h3 id=&quot;compose&quot;&gt;Compose&lt;/h3&gt;
+
+&lt;p&gt;I copied from &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;/usr/share/X11/locale/en_US.UTF-8/Compose&lt;/code&gt; to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;~/.XCompose&lt;/code&gt; and applied the following diff.&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;--- Compose	2018-06-23 21:37:15.647432197 +0200
++++ .XCompose	2018-06-23 22:19:59.832729155 +0200
+@@ -611,7 +611,7 @@
+ &amp;lt;Multi_key&amp;gt; &amp;lt;asterisk&amp;gt; &amp;lt;A&amp;gt; 		: &quot;Å&quot;   Aring # LATIN CAPITAL LETTER A WITH RING ABOVE
+ &amp;lt;Multi_key&amp;gt; &amp;lt;A&amp;gt; &amp;lt;asterisk&amp;gt; 		: &quot;Å&quot;   Aring # LATIN CAPITAL LETTER A WITH RING ABOVE
+ &amp;lt;Multi_key&amp;gt; &amp;lt;A&amp;gt; &amp;lt;A&amp;gt; 			: &quot;Å&quot;   Aring # LATIN CAPITAL LETTER A WITH RING ABOVE
+-&amp;lt;dead_cedilla&amp;gt; &amp;lt;C&amp;gt;               	: &quot;Ç&quot;   Ccedilla # LATIN CAPITAL LETTER C WITH CEDILLA
++&amp;lt;dead_acute&amp;gt; &amp;lt;C&amp;gt;               	: &quot;Ç&quot;   Ccedilla # LATIN CAPITAL LETTER C WITH CEDILLA
+ &amp;lt;Multi_key&amp;gt; &amp;lt;comma&amp;gt; &amp;lt;C&amp;gt;          	: &quot;Ç&quot;   Ccedilla # LATIN CAPITAL LETTER C WITH CEDILLA
+ &amp;lt;Multi_key&amp;gt; &amp;lt;C&amp;gt; &amp;lt;comma&amp;gt; 		: &quot;Ç&quot;   Ccedilla # LATIN CAPITAL LETTER C WITH CEDILLA
+ &amp;lt;Multi_key&amp;gt; &amp;lt;cedilla&amp;gt; &amp;lt;C&amp;gt;          	: &quot;Ç&quot;   Ccedilla # LATIN CAPITAL LETTER C WITH CEDILLA
+@@ -736,7 +736,7 @@
+ &amp;lt;Multi_key&amp;gt; &amp;lt;asterisk&amp;gt; &amp;lt;a&amp;gt; 		: &quot;å&quot;   aring # LATIN SMALL LETTER A WITH RING ABOVE
+ &amp;lt;Multi_key&amp;gt; &amp;lt;a&amp;gt; &amp;lt;asterisk&amp;gt; 		: &quot;å&quot;   aring # LATIN SMALL LETTER A WITH RING ABOVE
+ &amp;lt;Multi_key&amp;gt; &amp;lt;a&amp;gt; &amp;lt;a&amp;gt; 			: &quot;å&quot;   aring # LATIN SMALL LETTER A WITH RING ABOVE
+-&amp;lt;dead_cedilla&amp;gt; &amp;lt;c&amp;gt;               	: &quot;ç&quot;   ccedilla # LATIN SMALL LETTER C WITH CEDILLA
++&amp;lt;dead_acute&amp;gt; &amp;lt;c&amp;gt;               	: &quot;ç&quot;   ccedilla # LATIN SMALL LETTER C WITH CEDILLA
+ &amp;lt;Multi_key&amp;gt; &amp;lt;comma&amp;gt; &amp;lt;c&amp;gt;          	: &quot;ç&quot;   ccedilla # LATIN SMALL LETTER C WITH CEDILLA
+ &amp;lt;Multi_key&amp;gt; &amp;lt;c&amp;gt; &amp;lt;comma&amp;gt; 		: &quot;ç&quot;   ccedilla # LATIN SMALL LETTER C WITH CEDILLA
+ &amp;lt;Multi_key&amp;gt; &amp;lt;cedilla&amp;gt; &amp;lt;c&amp;gt;          	: &quot;ç&quot;   ccedilla # LATIN SMALL LETTER C WITH CEDILLA
+@@ -873,11 +873,9 @@
+ &amp;lt;Multi_key&amp;gt; &amp;lt;a&amp;gt; &amp;lt;semicolon&amp;gt;      	: &quot;ą&quot;   U0105 # LATIN SMALL LETTER A WITH OGONEK
+ &amp;lt;Multi_key&amp;gt; &amp;lt;comma&amp;gt; &amp;lt;a&amp;gt;         	: &quot;ą&quot;   U0105 # LATIN SMALL LETTER A WITH OGONEK
+ &amp;lt;Multi_key&amp;gt; &amp;lt;a&amp;gt; &amp;lt;comma&amp;gt; 		: &quot;ą&quot;   U0105 # LATIN SMALL LETTER A WITH OGONEK
+-&amp;lt;dead_acute&amp;gt; &amp;lt;C&amp;gt;                 	: &quot;Ć&quot;   U0106 # LATIN CAPITAL LETTER C WITH ACUTE
+ &amp;lt;Multi_key&amp;gt; &amp;lt;acute&amp;gt; &amp;lt;C&amp;gt;          	: &quot;Ć&quot;   U0106 # LATIN CAPITAL LETTER C WITH ACUTE
+ &amp;lt;Multi_key&amp;gt; &amp;lt;apostrophe&amp;gt; &amp;lt;C&amp;gt;     	: &quot;Ć&quot;   U0106 # LATIN CAPITAL LETTER C WITH ACUTE
+ &amp;lt;Multi_key&amp;gt; &amp;lt;C&amp;gt; &amp;lt;apostrophe&amp;gt; 		: &quot;Ć&quot;   U0106 # LATIN CAPITAL LETTER C WITH ACUTE
+-&amp;lt;dead_acute&amp;gt; &amp;lt;c&amp;gt;                 	: &quot;ć&quot;   U0107 # LATIN SMALL LETTER C WITH ACUTE
+ &amp;lt;Multi_key&amp;gt; &amp;lt;acute&amp;gt; &amp;lt;c&amp;gt;          	: &quot;ć&quot;   U0107 # LATIN SMALL LETTER C WITH ACUTE
+ &amp;lt;Multi_key&amp;gt; &amp;lt;apostrophe&amp;gt; &amp;lt;c&amp;gt;     	: &quot;ć&quot;   U0107 # LATIN SMALL LETTER C WITH ACUTE
+ &amp;lt;Multi_key&amp;gt; &amp;lt;c&amp;gt; &amp;lt;apostrophe&amp;gt; 		: &quot;ć&quot;   U0107 # LATIN SMALL LETTER C WITH ACUTE
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Weirdly, my current &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;/usr/share/X11/locale/en_US.UTF-8/Compose&lt;/code&gt; has no difference to my .XCompose, so I am not sure which one was the modification that made the trick.&lt;/p&gt;
+
+&lt;h3 id=&quot;keyboard&quot;&gt;Keyboard&lt;/h3&gt;
+
+&lt;p&gt;The keyboard layout &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;English (intl., with dead keys)&lt;/code&gt; works as expected in (almost) all apps. &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;~ + C&lt;/code&gt; gives me &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ç&lt;/code&gt; as &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;' + e&lt;/code&gt; gives me &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;é&lt;/code&gt;. Except PhpStorm. I can’t successfully type &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;&quot; ' ~ &lt;/code&gt; or the backtick within the editor. Just nothing gets typed. The PhpStorm Keymap settings can recognize when I type one of those keys, but the editor itself or other menus wouldn’t. I tried several different things, related with IBus, changing &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;XMODIFIERS&lt;/code&gt;, &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;/etc/environment&lt;/code&gt;, &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;~/.Xmodmap&lt;/code&gt; and &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;~/.profile&lt;/code&gt;, saw some bug reports on JetBrains tracker, but nothing really worked.&lt;/p&gt;
+
+&lt;p&gt;My current workaround is to have &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;English (intl, with AltGr dead keys)&lt;/code&gt; as a second keyboard layout that I use while I am on PhpStorm. Since I only write code (and comments) in English, it won’t be much of a problem, but I am having occasional mindfucks because I’ll keep forgetting to switch between keyboard layouts when I switch applications.&lt;/p&gt;</content><author><name></name></author><category term="en" /><category term="linux" /><summary type="html">It’s almost a year since I purchased this gaming computer and just now I had the need to do anything else than gaming in it. I have a friend that recently bought a notebook with a Nvidia GTX 1060 and he installed Fedora, making it a very snappy workstation, so I decided to give Fedora a go again. My computer came with Windows 10 by default and I never changed anything there, so here I am writing down all knowledge I got from installing Fedora in this machine.</summary></entry><entry><title type="html">SOCKS proxy with SSH</title><link href="https://www.kassner.com.br/en/2018/06/25/socks-proxy-with-ssh/" rel="alternate" type="text/html" title="SOCKS proxy with SSH" /><published>2018-06-25T00:00:00+00:00</published><updated>2018-06-25T00:00:00+00:00</updated><id>https://www.kassner.com.br/en/2018/06/25/socks-proxy-with-ssh</id><content type="html" xml:base="https://www.kassner.com.br/en/2018/06/25/socks-proxy-with-ssh/">&lt;p&gt;That’s not a new thing, but I happened to use it during the weekend to be able to access some services back in Brazil
+that were IP-limited and HideMyAss couldn’t help, so I asked a friend for a small proxy help.&lt;/p&gt;
+
+&lt;p&gt;What I did on my side:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;Opened a port on my modem to forward the connection to the port 51000 on my computer;&lt;/li&gt;
+  &lt;li&gt;Started a container: &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;docker run -p 51000:51000 -p 51001:51001 --rm -it ubuntu:xenial bash&lt;/code&gt;;&lt;/li&gt;
+  &lt;li&gt;Installed &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;supervisord&lt;/code&gt;, &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;openssh-server&lt;/code&gt; and added &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;GatewayPorts yes&lt;/code&gt; to &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;/etc/ssh/sshd_config&lt;/code&gt;;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;My friend had to run those commands in parallel:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ssh -D 51001 localhost&lt;/code&gt;;&lt;/li&gt;
+  &lt;li&gt;&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ssh -R :51001:localhost:51001 use@myIP -p 51000&lt;/code&gt;;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;And voilá, I had a SOCKS proxy over &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;localhost:51000&lt;/code&gt; that was going out to the internet using a Brazilian IP address.&lt;/p&gt;</content><author><name></name></author><category term="en" /><category term="linux" /><category term="network" /><summary type="html">That’s not a new thing, but I happened to use it during the weekend to be able to access some services back in Brazil that were IP-limited and HideMyAss couldn’t help, so I asked a friend for a small proxy help.</summary></entry><entry><title type="html">Profiling browser requests with Blackfire</title><link href="https://www.kassner.com.br/en/2017/06/16/profiling-browser-requests-with_blackfire/" rel="alternate" type="text/html" title="Profiling browser requests with Blackfire" /><published>2017-06-16T00:00:00+00:00</published><updated>2017-06-16T00:00:00+00:00</updated><id>https://www.kassner.com.br/en/2017/06/16/profiling-browser-requests-with_blackfire</id><content type="html" xml:base="https://www.kassner.com.br/en/2017/06/16/profiling-browser-requests-with_blackfire/">&lt;p&gt;This week’s task was optimising Magento for large carts (100+ different products) and a profiler is a good tool to find small pieces of code that could be optimised. &lt;a href=&quot;https://www.blackfire.io/&quot;&gt;Blackfire&lt;/a&gt; was my choice, mostly because previous experience, but also because it is not a resource hog like Xdebug, which was taking around 6 minutes while Blackfire took only 20 seconds in the same type of request.&lt;/p&gt;
+
+&lt;h2 id=&quot;companion&quot;&gt;Companion&lt;/h2&gt;
+
+&lt;p&gt;Blackfire works great to profile GET requests on the browser with the help of &lt;a href=&quot;https://blackfire.io/docs/integrations/chrome&quot;&gt;Companion&lt;/a&gt;, but it doesn’t allow you to profile POST requests. Also, Companion sends multiple requests to the same endpoint, but Magento’s place order is not stateless, so the first and all other request would differ substantially.&lt;/p&gt;
+
+&lt;h2 id=&quot;cli-tool&quot;&gt;CLI tool&lt;/h2&gt;
+
+&lt;p&gt;Second attempt was the Blackfire &lt;a href=&quot;https://blackfire.io/docs/cookbooks/profiling-http&quot;&gt;CLI tool&lt;/a&gt;, which allows you to profile anything you can reach with &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;curl&lt;/code&gt;, including POST requests and custom headers. But, you can only profile one request at the given time, so that means I need to assemble one HTTP call that does everything: login customer, add products to cart, collect totals, get shipment information, get payment information, save shipping, save payment, and finally place order. That way I am profiling a lot more than I need, not to mention that everything will be in the same requests and not have the same performance as the end customer will experience, since a lot of objects will have been cached in memory when the place order part is executed. So I ruled that out too.&lt;/p&gt;
+
+&lt;h2 id=&quot;xdebug&quot;&gt;Xdebug&lt;/h2&gt;
+
+&lt;p&gt;Xdebug does exactly what I want, but takes too much time, being almost impractical. You can enable the profiling for any HTTP request, so that wouldn’t be a problem, I just use my browser and to navigate through all the needed steps (I can even do that with Xdebug disabled and enable only for the last step) and then analyse the cachegrind files. But Xdebug uses too much resources, I was hitting a 5-minute timeout on FPM too easily and the results were contaminated by the slowness (everything was slower in a factor of ~5 compared to the latest Blackfire result).&lt;/p&gt;
+
+&lt;p&gt;One nice tip here: you can use &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;blackfire upload&lt;/code&gt; to send the Xdebug output files to Blackfire and see the analysis there, I am pretty amazed by that feature. Way to go SensioLabs!&lt;/p&gt;
+
+&lt;h2 id=&quot;custom-headers&quot;&gt;Custom headers&lt;/h2&gt;
+
+&lt;p&gt;With a bit of back and forth with SensioLabs support I was able to achieve what I wanted, even if requires a bit more work.&lt;/p&gt;
+
+&lt;h3 id=&quot;requirements&quot;&gt;Requirements&lt;/h3&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;Extension for your browser to modify the request headers (I used &lt;a href=&quot;https://chrome.google.com/webstore/detail/modheader/idgpnmonknjnojddfkpgkljpfnnfcklj?hl=en&quot;&gt;ModHeader&lt;/a&gt; for Google Chrome);&lt;/li&gt;
+  &lt;li&gt;Blackfire CLI tool;&lt;/li&gt;
+  &lt;li&gt;Blackfire configured on the webserver;&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h3 id=&quot;steps&quot;&gt;Steps&lt;/h3&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;Do all the preparation needed. I added all products to the cart, navigated to checkout page and filled all the information, only leaving out the ‘click on place order button’ step;&lt;/li&gt;
+  &lt;li&gt;Run &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;blackfire run env&lt;/code&gt; and copy the value of the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;BLACKFIRE_QUERY&lt;/code&gt; outputted variable;&lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;Using the browser extension, add the following headers to your request (&lt;a href=&quot;http://i.imgur.com/QMjadko.png&quot;&gt;example&lt;/a&gt;):&lt;/p&gt;
+
+    &lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;X-Blackfire-User-Agent: Blackfire Companion - Chrome/58.0.3029.110 Extension/1.10.0
+X-Blackfire-Query: [the value copied on #2]
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;    &lt;/div&gt;
+  &lt;/li&gt;
+  &lt;li&gt;Execute your request (click the place order button).&lt;/li&gt;
+  &lt;li&gt;&lt;a href=&quot;http://i.imgur.com/kIU3epD.png&quot;&gt;Profit&lt;/a&gt;.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;p&gt;With those steps, the first AJAX/POST request (that reaches PHP) with those headers will be profiled. &lt;em&gt;It only works once&lt;/em&gt;, so it will not profile the success page (which is the one the request I profiled redirects to). Every new request needs a new &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;X-Blackfire-Query&lt;/code&gt; header, so with this approach is not (yet) possible to profile the redirected page as well or other subsequent calls inside the same page.&lt;/p&gt;
+
+&lt;p&gt;If the request you want to profile is not the first one that you are able to fire, instead of using the extension on the browser, change your Javascript code to include those headers only for the request you need (or keep the extension but change the Javascript to remove them).&lt;/p&gt;
+
+&lt;h2 id=&quot;what-i-have-not-tried&quot;&gt;What I have not tried&lt;/h2&gt;
+
+&lt;p&gt;There are two other ways that I could profile what I wanted with Blackfire, but I haven’t tested:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;
+    &lt;p&gt;Use the &lt;a href=&quot;https://blackfire.io/docs/reference-guide/php-sdk&quot;&gt;PHP SDK&lt;/a&gt; and start/stop the profiling on the areas that you need. It sounds like is something that will work, but that means you need to do some changes on code. I would only go that route if I hadn’t found any alternative.&lt;/p&gt;
+  &lt;/li&gt;
+  &lt;li&gt;
+    &lt;p&gt;Using the scenario I described on the &lt;a href=&quot;#cli-tool&quot;&gt;CLI tool&lt;/a&gt;, but using the technic presented on &lt;a href=&quot;https://blog.blackfire.io/profiling-http-sub-requests-using-blackfire.html&quot;&gt;Profiling HTTP Sub-Requests using Blackfire&lt;/a&gt;. To achieve I would had to assemble all the HTTP calls as the same way as Magento would have done, and send the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;X-Blackfire-Query&lt;/code&gt; header with them. This will profile all the calls individually (thus not having the &lt;em&gt;in-memory cache&lt;/em&gt; problem), but it also requires a bit of coding, or preparing all the HTTP requests manually to some degree.&lt;/p&gt;
+  &lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h2 id=&quot;conclusion&quot;&gt;Conclusion&lt;/h2&gt;
+
+&lt;p&gt;Blackfire is a nice tool and I really like the help their support provided here. I wish they cover this edge case in their roadmap, but after this &lt;em&gt;discovery&lt;/em&gt; I am definitely not turning it down, I am very happy with the results. Please consider giving Blackfire a try if you need it.&lt;/p&gt;</content><author><name></name></author><category term="en" /><category term="php" /><category term="magento" /><category term="testing" /><summary type="html">This week’s task was optimising Magento for large carts (100+ different products) and a profiler is a good tool to find small pieces of code that could be optimised. Blackfire was my choice, mostly because previous experience, but also because it is not a resource hog like Xdebug, which was taking around 6 minutes while Blackfire took only 20 seconds in the same type of request.</summary></entry><entry><title type="html">Unidades de tempo no Ncat, alternativa ao netcat</title><link href="https://www.kassner.com.br/pt/2014/07/21/unidades-de-tempo-no-ncat-alternativa-ao-netcat/" rel="alternate" type="text/html" title="Unidades de tempo no Ncat, alternativa ao netcat" /><published>2014-07-21T00:00:00+00:00</published><updated>2014-07-21T00:00:00+00:00</updated><id>https://www.kassner.com.br/pt/2014/07/21/unidades-de-tempo-no-ncat-alternativa-ao-netcat</id><content type="html" xml:base="https://www.kassner.com.br/pt/2014/07/21/unidades-de-tempo-no-ncat-alternativa-ao-netcat/">&lt;p&gt;Olá,&lt;/p&gt;
+
+&lt;p&gt;É comum o uso da ferramenta &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;netcat&lt;/code&gt; com o ProxyCommand do SSH, que permite usar um servidor como bridge, útil quando precisamos conectar em uma máquina atrás de um firewall. Exemplo:&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;# Arquivo: ~/.ssh/config
+
+Host computadordaempresa
+  HostName 192.168.1.92 # O endereço IP que o firewall consegue enxergar
+  User outrousuario
+  IdentityFile ~/.ssh/id_rsa
+  ProxyCommand ssh meuusuario@firewall.empresa.com nc -w 120 %h %p
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Eu usava o &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;netcat&lt;/code&gt; e funcionava perfeitamente. Então, precisei conectar em uma máquina em outra rede, e o firewall desta utilizava CentOS 7, e ao tentar utilizar a configuração acima eu recebi o seguinte erro:&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;Ncat: Since April 2010, the default unit for -w is seconds, so your time of &quot;120&quot; is 2.0 minutes. Use &quot;120ms&quot; for 120 milliseconds. QUITTING.
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Eu não sabia, mas eu estava usando o &lt;a href=&quot;http://nmap.org/ncat/&quot;&gt;Ncat&lt;/a&gt; ao invés do velho &lt;a href=&quot;http://netcat.sourceforge.net/&quot;&gt;Netcat&lt;/a&gt;. Ainda não tive tempo de estudar as diferenças, porém uma é evidente. Todo parâmetro que um valor de tempo precisa ter a unidade. Em &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ncat --help&lt;/code&gt;:&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;nv&quot;&gt;$ &lt;/span&gt;nc &lt;span class=&quot;nt&quot;&gt;--help&lt;/span&gt;
+Ncat 6.40 &lt;span class=&quot;o&quot;&gt;(&lt;/span&gt; http://nmap.org/ncat &lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;
+Usage: ncat &lt;span class=&quot;o&quot;&gt;[&lt;/span&gt;options] &lt;span class=&quot;o&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;hostname&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;]&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;[&lt;/span&gt;port]
+
+Options taking a &lt;span class=&quot;nb&quot;&gt;time &lt;/span&gt;assume seconds. Append &lt;span class=&quot;s1&quot;&gt;'ms'&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for &lt;/span&gt;milliseconds,
+&lt;span class=&quot;s1&quot;&gt;'s'&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for &lt;/span&gt;seconds, &lt;span class=&quot;s1&quot;&gt;'m'&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for &lt;/span&gt;minutes, or &lt;span class=&quot;s1&quot;&gt;'h'&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for &lt;/span&gt;hours &lt;span class=&quot;o&quot;&gt;(&lt;/span&gt;e.g. 500ms&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;.&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Desta forma, minha configuração de SSH precisa ter a unidade de tempo (&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ms&lt;/code&gt;, &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;s&lt;/code&gt;, &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;m&lt;/code&gt;, &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;h&lt;/code&gt;, etc) adicionada ao parâmetro &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;-w&lt;/code&gt;:&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;  ProxyCommand ssh myusername@firewall.company.com nc -w 120m %h %p
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Até mais.&lt;/p&gt;</content><author><name></name></author><category term="pt" /><category term="linux" /><category term="network" /><summary type="html">Olá,</summary></entry><entry><title type="html">netcat replacement Ncat time unit</title><link href="https://www.kassner.com.br/en/2014/07/21/netcat-replacement-ncat-time-unit/" rel="alternate" type="text/html" title="netcat replacement Ncat time unit" /><published>2014-07-21T00:00:00+00:00</published><updated>2014-07-21T00:00:00+00:00</updated><id>https://www.kassner.com.br/en/2014/07/21/netcat-replacement-ncat-time-unit</id><content type="html" xml:base="https://www.kassner.com.br/en/2014/07/21/netcat-replacement-ncat-time-unit/">&lt;p&gt;Hi,&lt;/p&gt;
+
+&lt;p&gt;It’s common to use &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;netcat&lt;/code&gt; utility to work with SSH ProxyCommand, which allows to use a bridge server, very useful when you need to connect directly to a host behind a firewall. Example:&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;# File: ~/.ssh/config
+
+Host workbox
+  HostName 192.168.1.92 # The ip address that the bridge server can see
+  User anotherusername
+  IdentityFile ~/.ssh/id_rsa
+  ProxyCommand ssh myusername@firewall.company.com nc -w 120 %h %p
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;I was using &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;netcat&lt;/code&gt; until a couple of days, and works very smooth. Then I’ve setup a new server on another private network, behind a CentOS 7 firewall, and when I’ve tried the configuration above, I got this:&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;Ncat: Since April 2010, the default unit for -w is seconds, so your time of &quot;120&quot; is 2.0 minutes. Use &quot;120ms&quot; for 120 milliseconds. QUITTING.
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;I didn’t know, but I’m using &lt;a href=&quot;http://nmap.org/ncat/&quot;&gt;Ncat&lt;/a&gt; instead of the old &lt;a href=&quot;http://netcat.sourceforge.net/&quot;&gt;Netcat&lt;/a&gt;. I got not time to learn the differences, but I already found one. Every parameter that receives a time needs the unit. From &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ncat --help&lt;/code&gt;:&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;nv&quot;&gt;$ &lt;/span&gt;nc &lt;span class=&quot;nt&quot;&gt;--help&lt;/span&gt;
+Ncat 6.40 &lt;span class=&quot;o&quot;&gt;(&lt;/span&gt; http://nmap.org/ncat &lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;
+Usage: ncat &lt;span class=&quot;o&quot;&gt;[&lt;/span&gt;options] &lt;span class=&quot;o&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;hostname&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;]&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;[&lt;/span&gt;port]
+
+Options taking a &lt;span class=&quot;nb&quot;&gt;time &lt;/span&gt;assume seconds. Append &lt;span class=&quot;s1&quot;&gt;'ms'&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for &lt;/span&gt;milliseconds,
+&lt;span class=&quot;s1&quot;&gt;'s'&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for &lt;/span&gt;seconds, &lt;span class=&quot;s1&quot;&gt;'m'&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for &lt;/span&gt;minutes, or &lt;span class=&quot;s1&quot;&gt;'h'&lt;/span&gt; &lt;span class=&quot;k&quot;&gt;for &lt;/span&gt;hours &lt;span class=&quot;o&quot;&gt;(&lt;/span&gt;e.g. 500ms&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;nb&quot;&gt;.&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Then, in my SSH configuration I had to change the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;-w&lt;/code&gt; param to add the time unit (&lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;ms&lt;/code&gt;, &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;s&lt;/code&gt;, &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;m&lt;/code&gt;, &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;h&lt;/code&gt;, etc):&lt;/p&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;  ProxyCommand ssh myusername@firewall.company.com nc -w 120m %h %p
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Bye.&lt;/p&gt;</content><author><name></name></author><category term="en" /><category term="linux" /><category term="network" /><summary type="html">Hi,</summary></entry><entry><title type="html">Magento: conflito de rotas entre frontend e admin</title><link href="https://www.kassner.com.br/pt/2014/06/06/magento-conflito-de-rotas-entre-frontend-e-admin/" rel="alternate" type="text/html" title="Magento: conflito de rotas entre frontend e admin" /><published>2014-06-06T00:00:00+00:00</published><updated>2014-06-06T00:00:00+00:00</updated><id>https://www.kassner.com.br/pt/2014/06/06/magento-conflito-de-rotas-entre-frontend-e-admin</id><content type="html" xml:base="https://www.kassner.com.br/pt/2014/06/06/magento-conflito-de-rotas-entre-frontend-e-admin/">&lt;p&gt;Hoje eu estava trabalhando num bug de um módulo de terceiros. Algo simples, o botão do adicionar ao carrinho fazia seu trabalho por AJAX, ao invés do tradicional POST. Entretanto, toda vez que eu chamava a URL &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;http://.../ajaxcart/cart/add&lt;/code&gt;, eu recebia um HTTP status 302, ou seja, um redirecionamento, para a mesma URL, porém em modo seguro (HTTPS).&lt;/p&gt;
+
+&lt;p&gt;Depois de um processo de debug, constatei que o controller não era chamado quando era feita a requisição, portanto o problema deveria estar em alguma configuração do Magento. E de fato, estava. O painel administrativo estava configurado para utilizar o HTTPS (Configurações &amp;gt; Geral &amp;gt; Web &amp;gt; Seguro &amp;gt; Usar SSL no Admin), e quando eu removia esta opção, tudo funcionava conforme o esperado.&lt;/p&gt;
+
+&lt;p&gt;No final de contas, o problema era esse:&lt;/p&gt;
+
+&lt;div class=&quot;language-xml highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;    &lt;span class=&quot;nt&quot;&gt;&amp;lt;frontend&amp;gt;&lt;/span&gt;
+        &lt;span class=&quot;nt&quot;&gt;&amp;lt;routers&amp;gt;&lt;/span&gt;
+            &lt;span class=&quot;nt&quot;&gt;&amp;lt;ajaxcart&amp;gt;&lt;/span&gt;
+                &lt;span class=&quot;nt&quot;&gt;&amp;lt;use&amp;gt;&lt;/span&gt;standard&lt;span class=&quot;nt&quot;&gt;&amp;lt;/use&amp;gt;&lt;/span&gt;
+                &lt;span class=&quot;nt&quot;&gt;&amp;lt;args&amp;gt;&lt;/span&gt;
+                    &lt;span class=&quot;nt&quot;&gt;&amp;lt;module&amp;gt;&lt;/span&gt;Empresa_AjaxCart&lt;span class=&quot;nt&quot;&gt;&amp;lt;/module&amp;gt;&lt;/span&gt;
+                    &lt;span class=&quot;nt&quot;&gt;&amp;lt;frontname&amp;gt;&lt;/span&gt;ajaxcart&lt;span class=&quot;nt&quot;&gt;&amp;lt;/frontname&amp;gt;&lt;/span&gt;
+                &lt;span class=&quot;nt&quot;&gt;&amp;lt;/args&amp;gt;&lt;/span&gt;
+            &lt;span class=&quot;nt&quot;&gt;&amp;lt;/routename&amp;gt;&lt;/span&gt;
+        &lt;span class=&quot;nt&quot;&gt;&amp;lt;/routers&amp;gt;&lt;/span&gt;
+    &lt;span class=&quot;nt&quot;&gt;&amp;lt;/frontend&amp;gt;&lt;/span&gt;
+    &lt;span class=&quot;nt&quot;&gt;&amp;lt;admin&amp;gt;&lt;/span&gt;
+        &lt;span class=&quot;nt&quot;&gt;&amp;lt;routers&amp;gt;&lt;/span&gt;
+            &lt;span class=&quot;nt&quot;&gt;&amp;lt;ajaxcart&amp;gt;&lt;/span&gt;
+                &lt;span class=&quot;nt&quot;&gt;&amp;lt;use&amp;gt;&lt;/span&gt;admin&lt;span class=&quot;nt&quot;&gt;&amp;lt;/use&amp;gt;&lt;/span&gt;
+                &lt;span class=&quot;nt&quot;&gt;&amp;lt;args&amp;gt;&lt;/span&gt;
+                    &lt;span class=&quot;nt&quot;&gt;&amp;lt;module&amp;gt;&lt;/span&gt;Empresa_AjaxCart&lt;span class=&quot;nt&quot;&gt;&amp;lt;/module&amp;gt;&lt;/span&gt;
+                    &lt;span class=&quot;nt&quot;&gt;&amp;lt;frontname&amp;gt;&lt;/span&gt;ajaxcart&lt;span class=&quot;nt&quot;&gt;&amp;lt;/frontname&amp;gt;&lt;/span&gt;
+                &lt;span class=&quot;nt&quot;&gt;&amp;lt;/args&amp;gt;&lt;/span&gt;
+            &lt;span class=&quot;nt&quot;&gt;&amp;lt;/routename&amp;gt;&lt;/span&gt;
+        &lt;span class=&quot;nt&quot;&gt;&amp;lt;/routers&amp;gt;&lt;/span&gt;
+    &lt;span class=&quot;nt&quot;&gt;&amp;lt;/admin&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Percebam acima que nas duas situações, o &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;frontname&lt;/code&gt; é o mesmo. Desta forma, toda vez que era acessada uma url no padrão &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;http://.../ajaxcart/*&lt;/code&gt;, o Magento mandava uma resposta ao navegador para redirecionar para o modo seguro. No caso de um AJAX, isso traz dois problemas:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;Geralmente os desenvolvedores não se preocupam com outros status diferentes de 200 numa requisição AJAX;&lt;/li&gt;
+  &lt;li&gt;É necessário configurar a política conhecida como &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;Same-Origin Policy&lt;/code&gt;, ou ainda os famosos erros de &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;CORS&lt;/code&gt;, tal qual o Firefox informa:&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;Cross-Origin Request Blocked: The Same Origin Policy disallows reading the remote resource at https://.../ajaxcart/cart/add/. This can be fixed by moving the resource to the same domain or enabling CORS.
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Portanto, fica a dica, sempre que forem desenvolver módulos que tenham controllers tanto no frontend quanto no admin, atentem-se para não utilizar o mesmo frontname nas rotas.&lt;/p&gt;
+
+&lt;p&gt;Até mais!&lt;/p&gt;</content><author><name></name></author><category term="pt" /><category term="magento" /><category term="php" /><category term="redirect" /><category term="http" /><summary type="html">Hoje eu estava trabalhando num bug de um módulo de terceiros. Algo simples, o botão do adicionar ao carrinho fazia seu trabalho por AJAX, ao invés do tradicional POST. Entretanto, toda vez que eu chamava a URL http://.../ajaxcart/cart/add, eu recebia um HTTP status 302, ou seja, um redirecionamento, para a mesma URL, porém em modo seguro (HTTPS).</summary></entry><entry><title type="html">Magento: frontend and admin routes conflict</title><link href="https://www.kassner.com.br/en/2014/06/06/magento-frontend-and-admin-routes-conflict/" rel="alternate" type="text/html" title="Magento: frontend and admin routes conflict" /><published>2014-06-06T00:00:00+00:00</published><updated>2014-06-06T00:00:00+00:00</updated><id>https://www.kassner.com.br/en/2014/06/06/magento-frontend-and-admin-routes-conflict</id><content type="html" xml:base="https://www.kassner.com.br/en/2014/06/06/magento-frontend-and-admin-routes-conflict/">&lt;p&gt;Today I was working in a 3rd party module. Something very simple, an AJAX Add to Cart button. But, when I requested &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;http://.../ajaxcart/cart/add&lt;/code&gt;, I’ve got a 302 HTTP status, or, a redirect, to the same requested URL, but in secure mode (HTTPS).&lt;/p&gt;
+
+&lt;p&gt;After debugging, I could understand that the controller wasn’t being called, so I try to find a configuration problem. The Administration Panel was configured to be served on HTTPS (Configuration &amp;gt; General &amp;gt; Web &amp;gt; Secure &amp;gt; ???), and when I’ve removed this option, everything was working as expected.&lt;/p&gt;
+
+&lt;p&gt;Long story short, here is the problem:&lt;/p&gt;
+
+&lt;div class=&quot;language-xml highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;nt&quot;&gt;&amp;lt;frontend&amp;gt;&lt;/span&gt;
+    &lt;span class=&quot;nt&quot;&gt;&amp;lt;routers&amp;gt;&lt;/span&gt;
+        &lt;span class=&quot;nt&quot;&gt;&amp;lt;ajaxcart&amp;gt;&lt;/span&gt;
+            &lt;span class=&quot;nt&quot;&gt;&amp;lt;use&amp;gt;&lt;/span&gt;standard&lt;span class=&quot;nt&quot;&gt;&amp;lt;/use&amp;gt;&lt;/span&gt;
+            &lt;span class=&quot;nt&quot;&gt;&amp;lt;args&amp;gt;&lt;/span&gt;
+                &lt;span class=&quot;nt&quot;&gt;&amp;lt;module&amp;gt;&lt;/span&gt;Company_AjaxCart&lt;span class=&quot;nt&quot;&gt;&amp;lt;/module&amp;gt;&lt;/span&gt;
+                &lt;span class=&quot;nt&quot;&gt;&amp;lt;frontname&amp;gt;&lt;/span&gt;ajaxcart&lt;span class=&quot;nt&quot;&gt;&amp;lt;/frontname&amp;gt;&lt;/span&gt;
+            &lt;span class=&quot;nt&quot;&gt;&amp;lt;/args&amp;gt;&lt;/span&gt;
+        &lt;span class=&quot;nt&quot;&gt;&amp;lt;/routename&amp;gt;&lt;/span&gt;
+    &lt;span class=&quot;nt&quot;&gt;&amp;lt;/routers&amp;gt;&lt;/span&gt;
+&lt;span class=&quot;nt&quot;&gt;&amp;lt;/frontend&amp;gt;&lt;/span&gt;
+&lt;span class=&quot;nt&quot;&gt;&amp;lt;admin&amp;gt;&lt;/span&gt;
+    &lt;span class=&quot;nt&quot;&gt;&amp;lt;routers&amp;gt;&lt;/span&gt;
+        &lt;span class=&quot;nt&quot;&gt;&amp;lt;ajaxcart&amp;gt;&lt;/span&gt;
+            &lt;span class=&quot;nt&quot;&gt;&amp;lt;use&amp;gt;&lt;/span&gt;admin&lt;span class=&quot;nt&quot;&gt;&amp;lt;/use&amp;gt;&lt;/span&gt;
+            &lt;span class=&quot;nt&quot;&gt;&amp;lt;args&amp;gt;&lt;/span&gt;
+                &lt;span class=&quot;nt&quot;&gt;&amp;lt;module&amp;gt;&lt;/span&gt;Company_AjaxCart&lt;span class=&quot;nt&quot;&gt;&amp;lt;/module&amp;gt;&lt;/span&gt;
+                &lt;span class=&quot;nt&quot;&gt;&amp;lt;frontname&amp;gt;&lt;/span&gt;ajaxcart&lt;span class=&quot;nt&quot;&gt;&amp;lt;/frontname&amp;gt;&lt;/span&gt;
+            &lt;span class=&quot;nt&quot;&gt;&amp;lt;/args&amp;gt;&lt;/span&gt;
+        &lt;span class=&quot;nt&quot;&gt;&amp;lt;/routename&amp;gt;&lt;/span&gt;
+    &lt;span class=&quot;nt&quot;&gt;&amp;lt;/routers&amp;gt;&lt;/span&gt;
+&lt;span class=&quot;nt&quot;&gt;&amp;lt;/admin&amp;gt;&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Did you see that &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;frontname&lt;/code&gt; is the same both for frontend and admin? In this way, every time we call a URL with the pattern &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;http://.../ajaxcart/*&lt;/code&gt;, Magento replies you to redirect to secure mode. When using AJAX, we have to main problems with this:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;Developers don’t often worry about HTTP Status codes that aren’t 200;&lt;/li&gt;
+  &lt;li&gt;You have to configure the &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;Same-Origin Policy&lt;/code&gt;, or you’ll get &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;CORS&lt;/code&gt; errors like this:&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;div class=&quot;language-plaintext highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;Cross-Origin Request Blocked: The Same Origin Policy disallows reading the remote resource at https://.../ajaxcart/cart/add/. This can be fixed by moving the resource to the same domain or enabling CORS.
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;TL;DR: On every module you develop for Magento which needs controllers in admin and frontend, pay attention and don’t use the same &lt;code class=&quot;language-plaintext highlighter-rouge&quot;&gt;frontname&lt;/code&gt;.&lt;/p&gt;
+
+&lt;p&gt;Bye.&lt;/p&gt;</content><author><name></name></author><category term="en" /><category term="magento" /><category term="php" /><category term="redirect" /><category term="http" /><summary type="html">Today I was working in a 3rd party module. Something very simple, an AJAX Add to Cart button. But, when I requested http://.../ajaxcart/cart/add, I’ve got a 302 HTTP status, or, a redirect, to the same requested URL, but in secure mode (HTTPS).</summary></entry><entry><title type="html">Nginx: regex no server_name</title><link href="https://www.kassner.com.br/pt/2014/05/23/nginx-regex-no-server-name/" rel="alternate" type="text/html" title="Nginx: regex no server_name" /><published>2014-05-23T00:00:00+00:00</published><updated>2014-05-23T00:00:00+00:00</updated><id>https://www.kassner.com.br/pt/2014/05/23/nginx-regex-no-server-name</id><content type="html" xml:base="https://www.kassner.com.br/pt/2014/05/23/nginx-regex-no-server-name/">&lt;p&gt;Pequena dica para utilizar expressões regulares na diretiva &lt;a href=&quot;http://nginx.org/en/docs/http/server_names.html&quot;&gt;server_name&lt;/a&gt; do Nginx.&lt;/p&gt;
+
+&lt;p&gt;Usando um diretório específico para cada subdomínio:&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;server &lt;span class=&quot;o&quot;&gt;{&lt;/span&gt;
+    listen 80&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    server_name ~^&lt;span class=&quot;o&quot;&gt;(&lt;/span&gt;.&lt;span class=&quot;k&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\.&lt;/span&gt;project&lt;span class=&quot;se&quot;&gt;\.&lt;/span&gt;com&lt;span class=&quot;nv&quot;&gt;$;&lt;/span&gt;
+    root /home/www/project/&lt;span class=&quot;nv&quot;&gt;$1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;span class=&quot;o&quot;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Definindo uma variável de ambiente em um projeto único:&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;server &lt;span class=&quot;o&quot;&gt;{&lt;/span&gt;
+    listen 80&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    server_name ~^&lt;span class=&quot;o&quot;&gt;(&lt;/span&gt;.&lt;span class=&quot;k&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\.&lt;/span&gt;project&lt;span class=&quot;se&quot;&gt;\.&lt;/span&gt;com&lt;span class=&quot;nv&quot;&gt;$;&lt;/span&gt;
+    fastcgi_param CUSTOMER &lt;span class=&quot;nv&quot;&gt;$1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    root /home/www/project&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;span class=&quot;o&quot;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Você também pode utilizar a expressão para o domínio todo:&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;server &lt;span class=&quot;o&quot;&gt;{&lt;/span&gt;
+    listen 80&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    server_name ~^&lt;span class=&quot;o&quot;&gt;(&lt;/span&gt;.&lt;span class=&quot;k&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\.&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;(&lt;/span&gt;.&lt;span class=&quot;k&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\.&lt;/span&gt;.&lt;span class=&quot;k&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;nv&quot;&gt;$;&lt;/span&gt;
+    root /home/www/&lt;span class=&quot;nv&quot;&gt;$2&lt;/span&gt;/subdomains/&lt;span class=&quot;nv&quot;&gt;$1&lt;/span&gt;/public_html&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;span class=&quot;o&quot;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Testado no Nginx 1.4.x.&lt;/p&gt;</content><author><name></name></author><category term="pt" /><category term="nginx" /><summary type="html">Pequena dica para utilizar expressões regulares na diretiva server_name do Nginx.</summary></entry><entry><title type="html">Nginx: regex on server_name</title><link href="https://www.kassner.com.br/en/2014/05/23/nginx-regex-on-server-name/" rel="alternate" type="text/html" title="Nginx: regex on server_name" /><published>2014-05-23T00:00:00+00:00</published><updated>2014-05-23T00:00:00+00:00</updated><id>https://www.kassner.com.br/en/2014/05/23/nginx-regex-on-server-name</id><content type="html" xml:base="https://www.kassner.com.br/en/2014/05/23/nginx-regex-on-server-name/">&lt;p&gt;Quick tip to use regex on nginx’s &lt;a href=&quot;http://nginx.org/en/docs/http/server_names.html&quot;&gt;server_name&lt;/a&gt; directive.&lt;/p&gt;
+
+&lt;p&gt;Using a specific root directory for every subdomain:&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;server &lt;span class=&quot;o&quot;&gt;{&lt;/span&gt;
+    listen 80&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    server_name ~^&lt;span class=&quot;o&quot;&gt;(&lt;/span&gt;.&lt;span class=&quot;k&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\.&lt;/span&gt;project&lt;span class=&quot;se&quot;&gt;\.&lt;/span&gt;com&lt;span class=&quot;nv&quot;&gt;$;&lt;/span&gt;
+    root /home/www/project/&lt;span class=&quot;nv&quot;&gt;$1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;span class=&quot;o&quot;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Using an environment variable with a single project:&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;server &lt;span class=&quot;o&quot;&gt;{&lt;/span&gt;
+    listen 80&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    server_name ~^&lt;span class=&quot;o&quot;&gt;(&lt;/span&gt;.&lt;span class=&quot;k&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\.&lt;/span&gt;project&lt;span class=&quot;se&quot;&gt;\.&lt;/span&gt;com&lt;span class=&quot;nv&quot;&gt;$;&lt;/span&gt;
+    fastcgi_param CUSTOMER &lt;span class=&quot;nv&quot;&gt;$1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    root /home/www/project&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;span class=&quot;o&quot;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;You can also use the entire domain name with this:&lt;/p&gt;
+
+&lt;div class=&quot;language-bash highlighter-rouge&quot;&gt;&lt;div class=&quot;highlight&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;server &lt;span class=&quot;o&quot;&gt;{&lt;/span&gt;
+    listen 80&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+    server_name ~^&lt;span class=&quot;o&quot;&gt;(&lt;/span&gt;.&lt;span class=&quot;k&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\.&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;(&lt;/span&gt;.&lt;span class=&quot;k&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;se&quot;&gt;\.&lt;/span&gt;.&lt;span class=&quot;k&quot;&gt;*&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;)&lt;/span&gt;&lt;span class=&quot;nv&quot;&gt;$;&lt;/span&gt;
+    root /home/www/&lt;span class=&quot;nv&quot;&gt;$2&lt;/span&gt;/subdomains/&lt;span class=&quot;nv&quot;&gt;$1&lt;/span&gt;/public_html&lt;span class=&quot;p&quot;&gt;;&lt;/span&gt;
+&lt;span class=&quot;o&quot;&gt;}&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;&lt;/div&gt;&lt;/div&gt;
+
+&lt;p&gt;Tested with Nginx 1.4.x.&lt;/p&gt;</content><author><name></name></author><category term="en" /><category term="nginx" /><summary type="html">Quick tip to use regex on nginx’s server_name directive.</summary></entry></feed>

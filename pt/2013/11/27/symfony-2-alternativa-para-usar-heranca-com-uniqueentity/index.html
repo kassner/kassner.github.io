@@ -1,0 +1,32 @@
+<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta charset="UTF-8"><title>Symfony 2: alternativa para usar heranças com UniqueEntity | Rafael Kassner</title><meta name="robots" content="index,follow"/><link rel="alternate" type="application/rss+xml" title="RSS Feed" href="https://www.kassner.com.br/atom.xml"/><link rel="canonical" href="https://www.kassner.com.br/pt/2013/11/27/symfony-2-alternativa-para-usar-heranca-com-uniqueentity/"/><link rel="stylesheet" href="https://www.kassner.com.br/assets/css/main.css"/></head><body class="post"><div class="background"></div><div id="wrapper"> <header> <nav id="site-navigation" class="main-navigation" role="navigation"> <label for="drop" class="toggle">Menu</label> <input type="checkbox" id="drop"/><ul id="primary-menu" class="menu"><li class="menu-item"><a href="https://www.kassner.com.br">Rafael Kassner</a></li><li class="menu-item"><a href="https://www.kassner.com.br/projects/">Projects</a></li><li class="menu-item"><a href="https://www.kassner.com.br/about/">About</a></li></ul> </nav> </header><div class="pull-down"></div><div class="container"><div id="primary" class="content-area"> <main id="main" class="site-main" role="main"> <article lang="en" class="post type-post status-publish format-standard hentry"><h1 class="article-header"><a href="https://www.kassner.com.br/pt/2013/11/27/symfony-2-alternativa-para-usar-heranca-com-uniqueentity/">Symfony 2: alternativa para usar heranças com UniqueEntity</a></h1><div class="entry-meta"><div class="byline"> <span class="posted-on"><time class="entry-date published" datetime="2013-11-27T00:00:00+00:00">2013-11-27</time></span> <span class="language">Português</span></div></div><div class="entry-content"><p>Olá,</p><p>Hoje eu me deparei com um <a href="https://github.com/symfony/symfony/issues/4087">bug conhecido do Symfony2</a> ao usar UniqueEntity e herança com entidades. Na discussão, <a href="https://github.com/symfony/symfony/issues/4087#issuecomment-25349274">@gentisaliu recomendou</a> usar um repositório customizado, então estou documentando a solução abaixo:</p><p>Entidades:</p><div class="language-php highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="cd">/**
+ * @ORM\Table(name="parent")
+ * @ORM\Entity(repositoryClass="Repository\Parent")
+ * @UniqueEntity(fields={"name"}, repositoryMethod="findByName", message="Name already used.")
+ * @ORM\InheritanceType("JOINED")
+ * @ORM\DiscriminatorColumn(name="type", type="string")
+ * @ORM\DiscriminatorMap({
+ *      "a" = "ChildA",
+ *      "b" = "ChildB"
+ * })
+ */</span>
+<span class="kd">class</span> <span class="nc">Parent</span> <span class="p">{</span> <span class="p">}</span>
+</code></pre></div></div><div class="language-php highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="cd">/**
+ * @ORM\Entity(repositoryClass="Repository\Parent")
+ * @ORM\Table(name="child_a")
+ */</span>
+<span class="kd">class</span> <span class="nc">ChildA</span> <span class="kd">extends</span> <span class="nc">Parent</span> <span class="p">{</span> <span class="p">}</span>
+</code></pre></div></div><div class="language-php highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="cd">/**
+ * @ORM\Entity(repositoryClass="Repository\Parent")
+ * @ORM\Table(name="child_b")
+ */</span>
+<span class="kd">class</span> <span class="nc">ChildB</span> <span class="kd">extends</span> <span class="nc">Parent</span> <span class="p">{</span> <span class="p">}</span>
+</code></pre></div></div><p>repositoryMethod:</p><div class="language-php highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">public</span> <span class="k">function</span> <span class="n">findByName</span><span class="p">(</span><span class="nv">$criteria</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">return</span> <span class="nv">$this</span>
+            <span class="o">-&gt;</span><span class="nf">getEntityManager</span><span class="p">()</span>
+            <span class="o">-&gt;</span><span class="nf">createQuery</span><span class="p">(</span><span class="s2">"SELECT e FROM Parent e WHERE e.name = :name"</span><span class="p">)</span>
+            <span class="o">-&gt;</span><span class="nf">setParameters</span><span class="p">(</span><span class="nv">$criteria</span><span class="p">)</span>
+            <span class="o">-&gt;</span><span class="nf">getResult</span><span class="p">()</span>
+    <span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div></div><ol><li>O método <code class="language-plaintext highlighter-rouge">findByName</code> deve explicitamente fazer a busca na entidade pai, caso contrário ele verificará se é único apenas naquele tipo, e não globalmente <code class="language-plaintext highlighter-rouge">(name = ? AND type = ?)</code></li><li>A propriedade <code class="language-plaintext highlighter-rouge">repositoryMethod</code> define qual método do repositório vai ser utilizado para determinar se uma entidade é única ou não. O método deve retornar um objeto contável, array funciona, mas eu prefiro retornar o resultado da query.</li><li>A propriedade <code class="language-plaintext highlighter-rouge">repositoryClass</code> precisa ser a mesma para todas as entidades ou, caso você não possa usar o mesmo repositório, implemente o método <code class="language-plaintext highlighter-rouge">repositoryMethod</code> em todos os repositórios. Neste caso, tenha o cuidado do efetuar a query pela entidade pai, conforme item 1.</li></ol><p>Até mais.</p></div><div class="entry-footer"><p class="cat-links">Posted in <a href="/tags/php/" rel="tag">php</a>, <a href="/tags/symfony2/" rel="tag">symfony2</a>, <a href="/tags/doctrine/" rel="tag">doctrine</a></p></div> </article> </main></div></div></div><footer><div class="footer-content"></div><div class="footer"><div><div> <span class="copy">Copyright © 2010-2021 Rafael Kassner</span></div></div></div> </footer></body></html>

@@ -1,0 +1,3 @@
+Canonical: https://www.kassner.com.br/.well-known/security.txt
+Contact: kassner@gmail.com
+Preferred-Languages: en, pt

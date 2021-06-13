@@ -1,0 +1,23 @@
+<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta charset="UTF-8"><title>Debian: ping hostname não encontrado mas o DNS funciona | Rafael Kassner</title><meta name="robots" content="index,follow"/><link rel="alternate" type="application/rss+xml" title="RSS Feed" href="https://www.kassner.com.br/atom.xml"/><link rel="canonical" href="https://www.kassner.com.br/pt/2013/11/14/debian-ping-hostname-nao-encontrado-mas-o-dns-funciona/"/><link rel="stylesheet" href="https://www.kassner.com.br/assets/css/main.css"/></head><body class="post"><div class="background"></div><div id="wrapper"> <header> <nav id="site-navigation" class="main-navigation" role="navigation"> <label for="drop" class="toggle">Menu</label> <input type="checkbox" id="drop"/><ul id="primary-menu" class="menu"><li class="menu-item"><a href="https://www.kassner.com.br">Rafael Kassner</a></li><li class="menu-item"><a href="https://www.kassner.com.br/projects/">Projects</a></li><li class="menu-item"><a href="https://www.kassner.com.br/about/">About</a></li></ul> </nav> </header><div class="pull-down"></div><div class="container"><div id="primary" class="content-area"> <main id="main" class="site-main" role="main"> <article lang="en" class="post type-post status-publish format-standard hentry"><h1 class="article-header"><a href="https://www.kassner.com.br/pt/2013/11/14/debian-ping-hostname-nao-encontrado-mas-o-dns-funciona/">Debian: ping hostname não encontrado mas o DNS funciona</a></h1><div class="entry-meta"><div class="byline"> <span class="posted-on"><time class="entry-date published" datetime="2013-11-14T00:00:00+00:00">2013-11-14</time></span> <span class="language">Português</span></div></div><div class="entry-content"><p>Olá.</p><p>Hoje encontrei um erro estranho com o ping:</p><div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>kassner@brian<span class="nv">$ </span>ping git.company.local
+ping: unknown host git.company.local
+</code></pre></div></div><p>É um endereço local, então eu posso ter esquecido de adicionar o servidor DNS. Vamos verificar:</p><div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>kassner@brian<span class="nv">$ </span>dig A git.company.local
+
+<span class="p">;</span> &lt; &lt;<span class="o">&gt;&gt;</span> DiG 9.8.4-rpz2+rl005.12-P1 &lt; &lt;<span class="o">&gt;&gt;</span> A git.company.local
+<span class="p">;;</span> global options: +cmd
+<span class="p">;;</span> Got answer:
+<span class="p">;;</span> -&gt;&gt;HEADER&lt; &lt;- opcode: QUERY, status: NOERROR, <span class="nb">id</span>: 15746
+<span class="p">;;</span> flags: qr aa rd ra<span class="p">;</span> QUERY: 1, ANSWER: 1, AUTHORITY: 4, ADDITIONAL: 4
+
+<span class="p">;;</span> QUESTION SECTION:
+<span class="p">;</span>git.company.local. IN A
+
+<span class="p">;;</span> ANSWER SECTION:
+git.company.local. 86400 IN A 192.168.0.150
+
+<span class="p">;;</span> Query <span class="nb">time</span>: 0 msec
+<span class="p">;;</span> SERVER: 10.0.0.1#53<span class="o">(</span>10.0.0.1<span class="o">)</span>
+<span class="p">;;</span> WHEN: Thu Nov 14 12:05:45 2013
+<span class="p">;;</span> MSG SIZE rcvd: 249
+</code></pre></div></div><p>WTF? Ah, claro. É um endereço com sufixo <code class="language-plaintext highlighter-rouge">.local</code>, então o <a href="http://avahi.org/">Avahi</a> entra em cena. Como ele é desnecessário para minha rede local, eu desabilitei o mesmo no Debian Wheezy com o comando abaixo:</p><div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>kassner@brian<span class="nv">$ </span><span class="nb">sudo </span>update-rc.d <span class="nt">-f</span> avahi-daemon remove
+</code></pre></div></div><p>Isto deve desabilitar o Avahi temporariamente (até reiniciar). Se você quiser se livrar do Avahi, desinstale-o:</p><div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>kassner@brian<span class="nv">$ </span><span class="nb">sudo </span>apt-get remove avahi-daemon
+</code></pre></div></div><p>Até mais.</p></div><div class="entry-footer"><p class="cat-links">Posted in <a href="/tags/avahi/" rel="tag">avahi</a>, <a href="/tags/dns/" rel="tag">dns</a>, <a href="/tags/icmp/" rel="tag">icmp</a>, <a href="/tags/linux/" rel="tag">linux</a>, <a href="/tags/redes/" rel="tag">redes</a>, <a href="/tags/ping/" rel="tag">ping</a></p></div> </article> </main></div></div></div><footer><div class="footer-content"></div><div class="footer"><div><div> <span class="copy">Copyright © 2010-2021 Rafael Kassner</span></div></div></div> </footer></body></html>

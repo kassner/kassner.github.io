@@ -1,0 +1,49 @@
+<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta charset="UTF-8"><title>Erro de include no Zend_Loader | Rafael Kassner</title><meta name="robots" content="index,follow"/><link rel="alternate" type="application/rss+xml" title="RSS Feed" href="https://www.kassner.com.br/atom.xml"/><link rel="canonical" href="https://www.kassner.com.br/pt/2010/11/01/erro-de-include-no-zend_loader/"/><link rel="stylesheet" href="https://www.kassner.com.br/assets/css/main.css"/></head><body class="post"><div class="background"></div><div id="wrapper"> <header> <nav id="site-navigation" class="main-navigation" role="navigation"> <label for="drop" class="toggle">Menu</label> <input type="checkbox" id="drop"/><ul id="primary-menu" class="menu"><li class="menu-item"><a href="https://www.kassner.com.br">Rafael Kassner</a></li><li class="menu-item"><a href="https://www.kassner.com.br/projects/">Projects</a></li><li class="menu-item"><a href="https://www.kassner.com.br/about/">About</a></li></ul> </nav> </header><div class="pull-down"></div><div class="container"><div id="primary" class="content-area"> <main id="main" class="site-main" role="main"> <article lang="en" class="post type-post status-publish format-standard hentry"><h1 class="article-header"><a href="https://www.kassner.com.br/pt/2010/11/01/erro-de-include-no-zend_loader/">Erro de include no Zend_Loader</a></h1><div class="entry-meta"><div class="byline"> <span class="posted-on"><time class="entry-date published" datetime="2010-11-01T00:00:00+00:00">2010-11-01</time></span> <span class="language">Português</span></div></div><div class="entry-content"><p>Olá.</p><p>Hoje me deparei com um problema no Zend Framework e seu autoloader de classes, onde uma chamada ao <a href="http://br.php.net/class_exists">class_exists</a> dispara o autoloader do Zend Framework. A função tem uma opção de não disparar o autoloader, porém, ela sempre retorna false para objetos que são carregados dinamicamente via Zend_Loader.</p><p>Além disso, se eu uso class_exists sem desabilitar o autoloader, eu recebo um warning o arquivo com a classe não exista, isso por que o Zend_Loader não faz a verificação se o arquivo existe, ele apenas inclui.</p><p>A solução seria mudar o <code class="language-plaintext highlighter-rouge">Zend/Loader.php</code>, fazendo com que ele verifique se o arquivo da classe antes de tentar incluir, e isso deve ser feito dentro do método loadFile.</p><div class="language-php highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">public</span> <span class="k">static</span> <span class="k">function</span> <span class="n">loadFile</span><span class="p">(</span><span class="nv">$filename</span><span class="p">,</span> <span class="nv">$dirs</span> <span class="o">=</span> <span class="kc">null</span><span class="p">,</span> <span class="nv">$once</span> <span class="o">=</span> <span class="kc">false</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">self</span><span class="o">::</span><span class="nf">_securityCheck</span><span class="p">(</span><span class="nv">$filename</span><span class="p">);</span>
+
+    <span class="cd">/**
+     * Search in provided directories, as well as include_path
+     */</span>
+    <span class="nv">$incPath</span> <span class="o">=</span> <span class="kc">false</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="nb">empty</span><span class="p">(</span><span class="nv">$dirs</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="nb">is_array</span><span class="p">(</span><span class="nv">$dirs</span><span class="p">)</span> <span class="o">||</span> <span class="nb">is_string</span><span class="p">(</span><span class="nv">$dirs</span><span class="p">)))</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="nb">is_array</span><span class="p">(</span><span class="nv">$dirs</span><span class="p">))</span> <span class="p">{</span>
+            <span class="nv">$dirs</span> <span class="o">=</span> <span class="nb">implode</span><span class="p">(</span><span class="no">PATH_SEPARATOR</span><span class="p">,</span> <span class="nv">$dirs</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="nv">$incPath</span> <span class="o">=</span> <span class="nb">get_include_path</span><span class="p">();</span>
+        <span class="nb">set_include_path</span><span class="p">(</span><span class="nv">$dirs</span> <span class="mf">.</span> <span class="no">PATH_SEPARATOR</span> <span class="mf">.</span> <span class="nv">$incPath</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="cd">/**
+     * Try finding for the plain filename in the include_path.
+     */</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="k">self</span><span class="o">::</span><span class="nf">fileExists</span><span class="p">(</span><span class="nv">$filename</span><span class="p">))</span> <span class="p">{</span>
+        <span class="k">return</span> <span class="kc">false</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">if</span> <span class="p">(</span><span class="nv">$once</span><span class="p">)</span> <span class="p">{</span>
+        <span class="k">include_once</span> <span class="nv">$filename</span><span class="p">;</span>
+    <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+        <span class="k">include</span> <span class="nv">$filename</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="cd">/**
+     * If searching in directories, reset include_path
+     */</span>
+    <span class="k">if</span> <span class="p">(</span><span class="nv">$incPath</span><span class="p">)</span> <span class="p">{</span>
+        <span class="nb">set_include_path</span><span class="p">(</span><span class="nv">$incPath</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="k">return</span> <span class="kc">true</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="k">public</span> <span class="k">static</span> <span class="k">function</span> <span class="n">fileExists</span> <span class="p">(</span><span class="nv">$filename</span><span class="p">)</span> <span class="p">{</span>
+    <span class="nv">$paths</span> <span class="o">=</span> <span class="nb">explode</span><span class="p">(</span><span class="no">PATH_SEPARATOR</span><span class="p">,</span> <span class="nb">get_include_path</span><span class="p">());</span>
+    <span class="k">foreach</span> <span class="p">(</span><span class="nv">$paths</span> <span class="k">as</span> <span class="nv">$path</span><span class="p">)</span> <span class="p">{</span>
+        <span class="k">if</span> <span class="p">(</span><span class="nb">file_exists</span><span class="p">(</span><span class="nv">$path</span> <span class="mf">.</span> <span class="no">DIRECTORY_SEPARATOR</span> <span class="mf">.</span> <span class="nv">$filename</span><span class="p">))</span> <span class="p">{</span>
+            <span class="k">return</span> <span class="kc">true</span><span class="p">;</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="kc">false</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div></div><p>Até mais.</p></div><div class="entry-footer"><p class="cat-links">Posted in <a href="/tags/php/" rel="tag">php</a>, <a href="/tags/zend-framework/" rel="tag">zend framework</a></p></div> </article> </main></div></div></div><footer><div class="footer-content"></div><div class="footer"><div><div> <span class="copy">Copyright © 2010-2021 Rafael Kassner</span></div></div></div> </footer></body></html>

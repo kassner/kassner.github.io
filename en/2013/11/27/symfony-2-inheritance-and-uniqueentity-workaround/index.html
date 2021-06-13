@@ -1,0 +1,32 @@
+<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta charset="UTF-8"><title>Symfony 2: Inheritance and UniqueEntity workaround | Rafael Kassner</title><meta name="robots" content="index,follow"/><link rel="alternate" type="application/rss+xml" title="RSS Feed" href="https://www.kassner.com.br/atom.xml"/><link rel="canonical" href="https://www.kassner.com.br/en/2013/11/27/symfony-2-inheritance-and-uniqueentity-workaround/"/><link rel="stylesheet" href="https://www.kassner.com.br/assets/css/main.css"/></head><body class="post"><div class="background"></div><div id="wrapper"> <header> <nav id="site-navigation" class="main-navigation" role="navigation"> <label for="drop" class="toggle">Menu</label> <input type="checkbox" id="drop"/><ul id="primary-menu" class="menu"><li class="menu-item"><a href="https://www.kassner.com.br">Rafael Kassner</a></li><li class="menu-item"><a href="https://www.kassner.com.br/projects/">Projects</a></li><li class="menu-item"><a href="https://www.kassner.com.br/about/">About</a></li></ul> </nav> </header><div class="pull-down"></div><div class="container"><div id="primary" class="content-area"> <main id="main" class="site-main" role="main"> <article lang="en" class="post type-post status-publish format-standard hentry"><h1 class="article-header"><a href="https://www.kassner.com.br/en/2013/11/27/symfony-2-inheritance-and-uniqueentity-workaround/">Symfony 2: Inheritance and UniqueEntity workaround</a></h1><div class="entry-meta"><div class="byline"> <span class="posted-on"><time class="entry-date published" datetime="2013-11-27T00:00:00+00:00">2013-11-27</time></span> <span class="language">English</span></div></div><div class="entry-content"><p>Hi folks,</p><p>Today I struggled over an already <a href="https://github.com/symfony/symfony/issues/4087">known bug on Symfony2</a> when using UniqueEntity and Entity Inheritance. In the bug discussion, <a href="https://github.com/symfony/symfony/issues/4087#issuecomment-25349274">@gentisaliu recommended</a> using a custom repository, and how do this I’m documenting here.</p><p>Entities:</p><div class="language-php highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="cd">/**
+ * @ORM\Table(name="parent")
+ * @ORM\Entity(repositoryClass="Repository\Parent")
+ * @UniqueEntity(fields={"name"}, repositoryMethod="findByName", message="Name already used.")
+ * @ORM\InheritanceType("JOINED")
+ * @ORM\DiscriminatorColumn(name="type", type="string")
+ * @ORM\DiscriminatorMap({
+ *      "a" = "ChildA",
+ *      "b" = "ChildB"
+ * })
+ */</span>
+<span class="kd">class</span> <span class="nc">Parent</span> <span class="p">{</span> <span class="p">}</span>
+</code></pre></div></div><div class="language-php highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="cd">/**
+ * @ORM\Entity(repositoryClass="Repository\Parent")
+ * @ORM\Table(name="child_a")
+ */</span>
+<span class="kd">class</span> <span class="nc">ChildA</span> <span class="kd">extends</span> <span class="nc">Parent</span> <span class="p">{</span> <span class="p">}</span>
+</code></pre></div></div><div class="language-php highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="cd">/**
+ * @ORM\Entity(repositoryClass="Repository\Parent")
+ * @ORM\Table(name="child_b")
+ */</span>
+<span class="kd">class</span> <span class="nc">ChildB</span> <span class="kd">extends</span> <span class="nc">Parent</span> <span class="p">{</span> <span class="p">}</span>
+</code></pre></div></div><p>repositoryMethod:</p><div class="language-php highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">public</span> <span class="k">function</span> <span class="n">findByName</span><span class="p">(</span><span class="nv">$criteria</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="k">return</span> <span class="nv">$this</span>
+            <span class="o">-&gt;</span><span class="nf">getEntityManager</span><span class="p">()</span>
+            <span class="o">-&gt;</span><span class="nf">createQuery</span><span class="p">(</span><span class="s2">"SELECT e FROM Parent e WHERE e.name = :name"</span><span class="p">)</span>
+            <span class="o">-&gt;</span><span class="nf">setParameters</span><span class="p">(</span><span class="nv">$criteria</span><span class="p">)</span>
+            <span class="o">-&gt;</span><span class="nf">getResult</span><span class="p">()</span>
+    <span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div></div><ol><li>The findByName method must explicitly query the main entity, otherwise you will check a the uniqueness only for that type (name = ? AND type = ?)</li><li>The repositoryMethod defines which method in the repository will be used for determine if an entity is unique or not. You have to return an Countable object, array allowed, but I rather use a query result.</li><li>The repositoryClass must be the same of all entities, or if you can’t use the same repository, implement your “repositoryMethod” in all repositories. In such case you have to be cautious to do the query the base entity, not the child one.</li></ol><p>That’s all.</p></div><div class="entry-footer"><p class="cat-links">Posted in <a href="/tags/php/" rel="tag">php</a>, <a href="/tags/symfony2/" rel="tag">symfony2</a>, <a href="/tags/doctrine/" rel="tag">doctrine</a></p></div> </article> </main></div></div></div><footer><div class="footer-content"></div><div class="footer"><div><div> <span class="copy">Copyright © 2010-2021 Rafael Kassner</span></div></div></div> </footer></body></html>
